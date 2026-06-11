@@ -5,7 +5,7 @@ import json
 import re
 import fitz
 import base64
-import io
+from datetime import date
 
 st.set_page_config(page_title="Lease Review Agent", layout="wide")
 
@@ -26,7 +26,6 @@ def clean_json(text):
 def pdf_pages_to_images(file, max_pages=40):
     file_bytes = file.read()
     doc = fitz.open(stream=file_bytes, filetype="pdf")
-
     images = []
 
     for page_number in range(min(len(doc), max_pages)):
@@ -44,34 +43,23 @@ def pdf_pages_to_images(file, max_pages=40):
 
 
 def analyse_lease(filename, images):
+    today = date.today().isoformat()
 
     prompt = f"""
 You are reviewing a UK residential lease for a freehold/ground rent acquisition team.
 
-Extract ONLY the following:
+Today is {today}.
 
-1. Ground rent
-2. Review frequency
-3. Review mechanism
-4. Next review date if calculable
-5. Who insures
-6. Insurance payment position:
-   - landlord/freeholder pays and recharges tenant
-   - tenant insures directly
-   - insurance rent payable
-   - unclear
-7. Whether an insurance admin fee, management fee or commission can be charged/retained
-8. Evidence page/clause references
-9. Confidence
-10. Human review required
+Extract ONLY the following information.
 
 Return JSON only in exactly this structure:
 
 {{
   "ground_rent": "",
+  "first_review_date": "",
   "review_frequency": "",
   "review_mechanism": "",
-  "next_review_date": "",
+  "next_future_review_date": "",
   "who_insures": "",
   "insurance_payment_position": "",
   "insurance_admin_fee_available": "",
@@ -81,11 +69,23 @@ Return JSON only in exactly this structure:
   "human_review_required": ""
 }}
 
+Definitions:
+- ground_rent = annual rent payable under the lease.
+- first_review_date = the first rent review date in the lease.
+- review_frequency = how often rent is reviewed after the first review.
+- review_mechanism = RPI, CPI, doubling, fixed uplift, open market, etc.
+- next_future_review_date = the next review date after today's date. If the first review date has passed, calculate the next one using the review frequency.
+- who_insures = tenant, landlord/freeholder, management company, etc.
+- insurance_payment_position = tenant insures directly OR landlord insures and recharges OR insurance rent payable OR unclear.
+- insurance_admin_fee_available = whether landlord/freeholder can add an admin/management fee to insurance recharges.
+- insurance_commission_allowed = whether landlord/freeholder can retain insurance commission.
+
 Rules:
 - If not found, write "Not found".
 - If unclear, write "Unclear".
+- Include page/clause references.
 - Be conservative.
-- Include page references wherever possible.
+- If uncertain, human_review_required = Yes.
 
 Filename: {filename}
 """
@@ -94,12 +94,7 @@ Filename: {filename}
 
     response = client.responses.create(
         model="gpt-4.1",
-        input=[
-            {
-                "role": "user",
-                "content": content
-            }
-        ]
+        input=[{"role": "user", "content": content}]
     )
 
     output = clean_json(response.output_text)
@@ -113,15 +108,11 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-
     if st.button("Extract Lease Information"):
-
         results = []
 
         for file in uploaded_files:
-
             with st.spinner(f"Reviewing {file.name}..."):
-
                 try:
                     images = pdf_pages_to_images(file)
                     result = analyse_lease(file.name, images)
@@ -136,7 +127,6 @@ if uploaded_files:
                     })
 
         df = pd.DataFrame(results)
-
         cols = ["file"] + [c for c in df.columns if c != "file"]
         df = df[cols]
 
