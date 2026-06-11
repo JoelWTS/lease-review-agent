@@ -5,7 +5,7 @@ import json
 import re
 import fitz
 import base64
-from datetime import date
+from datetime import date, datetime
 
 st.set_page_config(page_title="Lease Review Agent", layout="wide")
 
@@ -23,14 +23,33 @@ def clean_json(text):
     return text.strip()
 
 
-def pdf_pages_to_images(file, max_pages=15):
+def selected_page_numbers(total_pages):
+    pages = set()
+
+    # front pages usually contain parties, rent definitions and property info
+    for i in range(0, min(8, total_pages)):
+        pages.add(i)
+
+    # middle pages often contain insurance/tenant covenants
+    for i in range(14, min(23, total_pages)):
+        pages.add(i)
+
+    # back pages often contain rent review schedules
+    for i in range(max(0, total_pages - 10), total_pages):
+        pages.add(i)
+
+    return sorted(pages)
+
+
+def pdf_pages_to_images(file):
     file_bytes = file.read()
     doc = fitz.open(stream=file_bytes, filetype="pdf")
+
     images = []
 
-    for page_number in range(min(len(doc), max_pages)):
+    for page_number in selected_page_numbers(len(doc)):
         page = doc[page_number]
-        pix = page.get_pixmap(matrix=fitz.Matrix(1.0, 1.0))
+        pix = page.get_pixmap(matrix=fitz.Matrix(0.8, 0.8))
         img_bytes = pix.tobytes("png")
         img_base64 = base64.b64encode(img_bytes).decode("utf-8")
 
@@ -40,6 +59,68 @@ def pdf_pages_to_images(file, max_pages=15):
         })
 
     return images
+
+
+def parse_date(value):
+    if not value:
+        return None
+
+    value = str(value).strip()
+
+    formats = [
+        "%d %B %Y",
+        "%d %b %Y",
+        "%d/%m/%Y",
+        "%Y-%m-%d",
+        "%d.%m.%Y",
+        "%d-%m-%Y"
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(value, fmt).date()
+        except Exception:
+            pass
+
+    return None
+
+
+def extract_year_gap(review_frequency, review_mechanism):
+    text = f"{review_frequency} {review_mechanism}".lower()
+
+    if "ten" in text or "10" in text or "tenth" in text:
+        return 10
+    if "twenty five" in text or "25" in text:
+        return 25
+    if "five" in text or "5" in text:
+        return 5
+    if "annual" in text or "yearly" in text or "each year" in text:
+        return 1
+
+    return None
+
+
+def calculate_next_future_review(first_review_date, review_frequency, review_mechanism):
+    first_date = parse_date(first_review_date)
+
+    if not first_date:
+        return "Unclear"
+
+    gap = extract_year_gap(review_frequency, review_mechanism)
+
+    if not gap:
+        return "Unclear"
+
+    today = date.today()
+    next_date = first_date
+
+    while next_date <= today:
+        try:
+            next_date = next_date.replace(year=next_date.year + gap)
+        except ValueError:
+            next_date = next_date.replace(month=2, day=28, year=next_date.year + gap)
+
+    return next_date.strftime("%d %B %Y")
 
 
 def analyse_lease(filename, images):
@@ -69,24 +150,20 @@ Return JSON only in exactly this structure:
   "human_review_required": ""
 }}
 
-Definitions:
-
-ground_rent = annual ground rent payable.
-first_review_date = first rent review date in the lease.
-review_frequency = frequency of reviews.
-review_mechanism = doubling, RPI, CPI, fixed increase etc.
-next_future_review_date = next review date after today.
-who_insures = landlord, management company, tenant etc.
-insurance_payment_position = who actually pays and whether it is recharged.
-insurance_admin_fee_available = can landlord charge an admin fee or management fee in relation to insurance recoveries.
-insurance_commission_allowed = can landlord retain insurance commission.
-evidence = page numbers and clause references.
+Important:
+- first_review_date is the first rent review date in the lease.
+- next_future_review_date must be AFTER today's date.
+- Example: if first_review_date is 1 January 2026, review_frequency is every 10 years, and today is after 1 January 2026, then next_future_review_date is 1 January 2036.
+- Do not repeat a past review date as the next_future_review_date.
+- For insurance_admin_fee_available, look for wording allowing admin fees, management fees, charges, expenses, costs, commission, or similar sums in connection with insurance or insurance recharges.
+- If the lease only allows recovery of insurance premium but no admin/management fee, say "No express admin fee found".
+- If the tenant insures directly but the landlord can insure after default and recover the cost, say that clearly.
 
 Rules:
 - If not found write "Not found".
 - If unclear write "Unclear".
 - Be conservative.
-- Include page references wherever possible.
+- Include page references and clause references wherever possible.
 - If uncertain set human_review_required to Yes.
 
 Filename:
@@ -106,8 +183,15 @@ Filename:
     )
 
     output = clean_json(response.output_text)
+    result = json.loads(output)
 
-    return json.loads(output)
+    result["next_future_review_date"] = calculate_next_future_review(
+        result.get("first_review_date", ""),
+        result.get("review_frequency", ""),
+        result.get("review_mechanism", "")
+    )
+
+    return result
 
 
 uploaded_files = st.file_uploader(
